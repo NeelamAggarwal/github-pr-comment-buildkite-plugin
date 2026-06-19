@@ -1,0 +1,28 @@
+name: GitHub PR Comment
+description: Post a comment to a GitHub pull request, including PRs that live in a different repository than the running build.
+author: https://github.com/NeelamAggarwal
+requirements:
+  - bash
+  - curl
+  - jq or python3
+configuration:
+  properties:
+    comment:
+      type: string
+      description: Literal markdown body to post. Mutually exclusive with comment-path.
+    comment-path:
+      type: string
+      description: Path to a file whose contents are posted as the comment body, read at runtime. Mutually exclusive with comment.
+    pr:
+      type: string
+      description: Pull request number to comment on. Defaults to $BUILDKITE_PULL_REQUEST.
+    repo:
+      type: string
+      description: Target repository as "owner/name" or a git/https URL. Defaults to $BUILDKITE_PULL_REQUEST_REPO.
+    token-env:
+      type: string
+      description: Name of the environment variable holding the GitHub token. Defaults to GITHUB_TOKEN.
+    expand:
+      type: boolean
+      description: When true, expand $VAR references in the comment body using the runtime environment (requires envsubst).
+  additionalProperties: false

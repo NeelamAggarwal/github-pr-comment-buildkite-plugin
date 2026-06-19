@@ -1,0 +1,16 @@
+steps:
+  - label: ":shell: shellcheck"
+    plugins:
+      - shellcheck#v1.4.0:
+          files: hooks/post-command
+
+  - label: ":buildkite: plugin lint"
+    plugins:
+      - plugin-linter#v3.3.0:
+          id: NeelamAggarwal/github-pr-comment
+
+  - label: ":bats: tests"
+    plugins:
+      - docker#v5.12.0:
+          image: "bats/bats:1.11.0"
+          command: ["tests/"]

@@ -1,0 +1,108 @@
+#!/usr/bin/env bash
+# Post a comment to a GitHub pull request.
+#
+# Runs as a post-command hook so it executes at job runtime (after the step's
+# own commands), with the live build environment available. This matters: the
+# comment body and PR/repo values are read from the runtime environment, not
+# from pipeline-upload-time interpolation, so values produced by the build
+# (or set in a pipeline `env:` block) resolve correctly.
+#
+# The PR can live in a different repository than the one being built, which is
+# why the target repo and PR number are configurable rather than derived solely
+# from BUILDKITE_PULL_REQUEST_REPO.
+
+set -euo pipefail
+
+comment="${BUILDKITE_PLUGIN_GITHUB_PR_COMMENT_COMMENT:-}"
+comment_path="${BUILDKITE_PLUGIN_GITHUB_PR_COMMENT_COMMENT_PATH:-}"
+pr="${BUILDKITE_PLUGIN_GITHUB_PR_COMMENT_PR:-${BUILDKITE_PULL_REQUEST:-}}"
+repo="${BUILDKITE_PLUGIN_GITHUB_PR_COMMENT_REPO:-${BUILDKITE_PULL_REQUEST_REPO:-}}"
+token_env="${BUILDKITE_PLUGIN_GITHUB_PR_COMMENT_TOKEN_ENV:-GITHUB_TOKEN}"
+expand="${BUILDKITE_PLUGIN_GITHUB_PR_COMMENT_EXPAND:-false}"
+
+log() { echo "github-pr-comment: $*" >&2; }
+
+# Skip on non-PR builds. Buildkite sets BUILDKITE_PULL_REQUEST to "false".
+if [[ -z "$pr" || "$pr" == "false" ]]; then
+  log "no pull request number; skipping."
+  exit 0
+fi
+
+# Resolve owner/name from "owner/name" or a git/https URL.
+owner_repo=""
+if [[ "$repo" =~ ^[^/[:space:]]+/[^/[:space:]]+$ ]]; then
+  owner_repo="$repo"
+elif [[ "$repo" =~ ^(https|git)(://|@)([^/:]+)[/:]([^/]+)/(.+)$ ]]; then
+  owner_repo="${BASH_REMATCH[4]}/${BASH_REMATCH[5]%.git}"
+fi
+if [[ -z "$owner_repo" ]]; then
+  log "could not parse owner/name from repo '${repo}'; skipping."
+  exit 0
+fi
+
+# Resolve token from the configured env var; non-fatal if missing so that a
+# misconfigured agent never fails an otherwise-green build.
+token="${!token_env:-}"
+if [[ -z "$token" ]]; then
+  log "\$${token_env} is not set; skipping."
+  exit 0
+fi
+
+# Resolve the comment body from comment-path (read at runtime) or comment.
+body=""
+if [[ -n "$comment_path" ]]; then
+  if [[ ! -f "$comment_path" ]]; then
+    log "comment-path '${comment_path}' not found; skipping."
+    exit 0
+  fi
+  body="$(cat "$comment_path")"
+elif [[ -n "$comment" ]]; then
+  body="$comment"
+else
+  log "one of 'comment' or 'comment-path' is required; skipping."
+  exit 0
+fi
+
+if [[ "$expand" == "true" ]]; then
+  if command -v envsubst >/dev/null 2>&1; then
+    body="$(envsubst <<<"$body")"
+  else
+    log "WARN expand=true but envsubst is unavailable; posting body unexpanded."
+  fi
+fi
+
+log "posting comment to ${owner_repo}#${pr}"
+
+response_file="$(mktemp)"
+payload_file="$(mktemp)"
+trap 'rm -f "$response_file" "$payload_file"' EXIT
+
+# Encode the request body as JSON. Prefer jq, fall back to python3 so the hook
+# works on agents that lack jq. If neither is available, skip rather than risk
+# emitting malformed JSON or failing the build.
+if command -v jq >/dev/null 2>&1; then
+  jq -n --arg body "$body" '{body: $body}' >"$payload_file"
+elif command -v python3 >/dev/null 2>&1; then
+  GHPC_BODY="$body" python3 -c 'import json, os, sys; sys.stdout.write(json.dumps({"body": os.environ["GHPC_BODY"]}))' >"$payload_file"
+else
+  log "WARN neither jq nor python3 is available to encode JSON; skipping."
+  exit 0
+fi
+
+http_code="$(
+  curl -sS -o "$response_file" -w '%{http_code}' \
+    -X POST \
+    -H "Authorization: Bearer ${token}" \
+    -H "Accept: application/vnd.github+json" \
+    -H "X-GitHub-Api-Version: 2022-11-28" \
+    -H "Content-Type: application/json" \
+    --data-binary @"$payload_file" \
+    "https://api.github.com/repos/${owner_repo}/issues/${pr}/comments" || true
+)"
+
+if [[ "$http_code" =~ ^2 ]]; then
+  log "posted comment to ${owner_repo}#${pr}."
+else
+  log "WARN failed to post comment (HTTP ${http_code:-000}); not failing the build."
+  cat "$response_file" >&2 || true
+fi
