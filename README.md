@@ -69,6 +69,28 @@ steps:
           comment-path: "/tmp/comment.md"
 ```
 
+### Sticky comment (edit in place across runs)
+
+```yaml
+steps:
+  - label: "Comment on upstream PR"
+    command: "true"
+    plugins:
+      - NeelamAggarwal/github-pr-comment#v0.1.0:
+          pr: "$UPSTREAM_PULL_REQUEST"
+          repo: "acme/backend"
+          token-env: "GITHUB_API_TOKEN"
+          sticky: true
+          comment: "Build `$$BUILD_TAG` deployed."
+```
+
+With `sticky: true`, the first run posts a comment and later runs **edit that same
+comment** instead of stacking new ones. The plugin finds its previous comment via a
+hidden marker it embeds in the body. Because GitHub does **not** send notifications
+for comment *edits*, subscribers are pinged once (on the initial post) and updates
+after that are silent. Use `sticky-key` to keep multiple independent sticky comments
+on the same PR (e.g. one per environment).
+
 ## Configuration
 
 | Option         | Required | Default                        | Description                                                                 |
@@ -79,6 +101,8 @@ steps:
 | `repo`         | no       | `$BUILDKITE_PULL_REQUEST_REPO` | Target repo as `owner/name` or a git/https URL.                             |
 | `token-env`    | no       | `GITHUB_TOKEN`                 | Name of the env var holding the GitHub token (used as a Bearer token).      |
 | `expand`       | no       | `false`                        | Expand `$VAR` in the body using the runtime environment (requires envsubst).|
+| `sticky`       | no       | `false`                        | Edit a single comment in place across runs instead of posting a new one.    |
+| `sticky-key`   | no       | `default`                      | Distinguishes independent sticky comments on the same PR.                   |
 
 \* Exactly one of `comment` or `comment-path` must be provided.
 
@@ -88,6 +112,9 @@ steps:
 - A **missing token** logs a warning and skips — it never fails the build.
 - A **failed API call** logs a warning with the HTTP status and response body, and
   does **not** fail the build.
+- With **`sticky: true`**, a hidden marker is appended to the body so subsequent
+  runs locate and **edit** the same comment. Comment edits do not trigger GitHub
+  notifications, so redeploys update silently.
 
 ## Authentication
 

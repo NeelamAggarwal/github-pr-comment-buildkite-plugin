@@ -25,4 +25,10 @@ configuration:
     expand:
       type: boolean
       description: When true, expand $VAR references in the comment body using the runtime environment (requires envsubst).
+    sticky:
+      type: boolean
+      description: When true, edit a single comment in place across runs instead of posting a new one each time. Editing does not send GitHub notifications.
+    sticky-key:
+      type: string
+      description: Identifier used to distinguish independent sticky comments on the same PR. Defaults to "default".
   additionalProperties: false

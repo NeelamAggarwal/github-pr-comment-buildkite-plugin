@@ -10,6 +10,11 @@
 # The PR can live in a different repository than the one being built, which is
 # why the target repo and PR number are configurable rather than derived solely
 # from BUILDKITE_PULL_REQUEST_REPO.
+#
+# With `sticky: true`, the hook edits a single comment in place across runs
+# (identified by a hidden marker) instead of appending a new comment each time.
+# Editing a comment does not send GitHub notifications, so repeated runs update
+# the comment silently.
 
 set -euo pipefail
 
@@ -19,6 +24,8 @@ pr="${BUILDKITE_PLUGIN_GITHUB_PR_COMMENT_PR:-${BUILDKITE_PULL_REQUEST:-}}"
 repo="${BUILDKITE_PLUGIN_GITHUB_PR_COMMENT_REPO:-${BUILDKITE_PULL_REQUEST_REPO:-}}"
 token_env="${BUILDKITE_PLUGIN_GITHUB_PR_COMMENT_TOKEN_ENV:-GITHUB_TOKEN}"
 expand="${BUILDKITE_PLUGIN_GITHUB_PR_COMMENT_EXPAND:-false}"
+sticky="${BUILDKITE_PLUGIN_GITHUB_PR_COMMENT_STICKY:-false}"
+sticky_key="${BUILDKITE_PLUGIN_GITHUB_PR_COMMENT_STICKY_KEY:-default}"
 
 log() { echo "github-pr-comment: $*" >&2; }
 
@@ -71,38 +78,109 @@ if [[ "$expand" == "true" ]]; then
   fi
 fi
 
-log "posting comment to ${owner_repo}#${pr}"
-
-response_file="$(mktemp)"
-payload_file="$(mktemp)"
-trap 'rm -f "$response_file" "$payload_file"' EXIT
-
-# Encode the request body as JSON. Prefer jq, fall back to python3 so the hook
-# works on agents that lack jq. If neither is available, skip rather than risk
-# emitting malformed JSON or failing the build.
+# Pick a JSON tool once. Prefer jq, fall back to python3 so the hook works on
+# agents that lack jq. If neither is available, skip rather than risk emitting
+# malformed JSON or failing the build.
+json_tool=""
 if command -v jq >/dev/null 2>&1; then
-  jq -n --arg body "$body" '{body: $body}' >"$payload_file"
+  json_tool="jq"
 elif command -v python3 >/dev/null 2>&1; then
-  GHPC_BODY="$body" python3 -c 'import json, os, sys; sys.stdout.write(json.dumps({"body": os.environ["GHPC_BODY"]}))' >"$payload_file"
+  json_tool="python3"
 else
   log "WARN neither jq nor python3 is available to encode JSON; skipping."
   exit 0
 fi
 
+api="https://api.github.com/repos/${owner_repo}"
+auth_headers=(
+  -H "Authorization: Bearer ${token}"
+  -H "Accept: application/vnd.github+json"
+  -H "X-GitHub-Api-Version: 2022-11-28"
+)
+
+# For sticky comments, embed a hidden HTML-comment marker so future runs can
+# find and edit the same comment. The marker renders invisibly on GitHub.
+marker=""
+if [[ "$sticky" == "true" ]]; then
+  marker="<!-- github-pr-comment:sticky:${sticky_key} -->"
+  body="${body}"$'\n\n'"${marker}"
+fi
+
+# Find the id of an existing sticky comment carrying the marker, if any.
+# Pages through issue comments (up to 10 pages of 100). Best-effort: any error
+# returns empty so we fall back to creating a new comment.
+find_sticky_comment_id() {
+  local m="$1" page=1 resp id len
+  while ((page <= 10)); do
+    resp="$(curl -sS "${auth_headers[@]}" "${api}/issues/${pr}/comments?per_page=100&page=${page}")" || return 0
+    if [[ "$json_tool" == "jq" ]]; then
+      id="$(jq -r --arg m "$m" '[.[] | select(.body != null and (.body | contains($m)))][0].id // empty' <<<"$resp" 2>/dev/null || true)"
+      len="$(jq 'length' <<<"$resp" 2>/dev/null || echo 0)"
+    else
+      id="$(GHPC_MARKER="$m" python3 -c 'import json,os,sys
+m=os.environ["GHPC_MARKER"]
+try:
+    data=json.load(sys.stdin)
+except Exception:
+    data=[]
+print(next((str(c["id"]) for c in data if isinstance(c,dict) and isinstance(c.get("body"),str) and m in c["body"]), ""))' <<<"$resp" 2>/dev/null || true)"
+      len="$(python3 -c 'import json,sys
+try:
+    print(len(json.load(sys.stdin)))
+except Exception:
+    print(0)' <<<"$resp" 2>/dev/null || echo 0)"
+    fi
+    if [[ -n "${id:-}" ]]; then
+      echo "$id"
+      return 0
+    fi
+    [[ "${len:-0}" -lt 100 ]] && break
+    page=$((page + 1))
+  done
+  return 0
+}
+
+comment_id=""
+if [[ "$sticky" == "true" ]]; then
+  comment_id="$(find_sticky_comment_id "$marker")"
+fi
+
+response_file="$(mktemp)"
+payload_file="$(mktemp)"
+trap 'rm -f "$response_file" "$payload_file"' EXIT
+
+if [[ "$json_tool" == "jq" ]]; then
+  jq -n --arg body "$body" '{body: $body}' >"$payload_file"
+else
+  GHPC_BODY="$body" python3 -c 'import json, os, sys; sys.stdout.write(json.dumps({"body": os.environ["GHPC_BODY"]}))' >"$payload_file"
+fi
+
+if [[ -n "$comment_id" ]]; then
+  method="PATCH"
+  url="${api}/issues/comments/${comment_id}"
+  log "editing existing comment ${comment_id} on ${owner_repo}#${pr}"
+else
+  method="POST"
+  url="${api}/issues/${pr}/comments"
+  log "posting comment to ${owner_repo}#${pr}"
+fi
+
 http_code="$(
   curl -sS -o "$response_file" -w '%{http_code}' \
-    -X POST \
-    -H "Authorization: Bearer ${token}" \
-    -H "Accept: application/vnd.github+json" \
-    -H "X-GitHub-Api-Version: 2022-11-28" \
+    -X "$method" \
+    "${auth_headers[@]}" \
     -H "Content-Type: application/json" \
     --data-binary @"$payload_file" \
-    "https://api.github.com/repos/${owner_repo}/issues/${pr}/comments" || true
+    "$url" || true
 )"
 
 if [[ "$http_code" =~ ^2 ]]; then
-  log "posted comment to ${owner_repo}#${pr}."
+  if [[ -n "$comment_id" ]]; then
+    log "edited comment ${comment_id} on ${owner_repo}#${pr}."
+  else
+    log "posted comment to ${owner_repo}#${pr}."
+  fi
 else
-  log "WARN failed to post comment (HTTP ${http_code:-000}); not failing the build."
+  log "WARN failed to ${method} comment (HTTP ${http_code:-000}); not failing the build."
   cat "$response_file" >&2 || true
 fi
