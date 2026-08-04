@@ -91,18 +91,61 @@ for comment *edits*, subscribers are pinged once (on the initial post) and updat
 after that are silent. Use `sticky-key` to keep multiple independent sticky comments
 on the same PR (e.g. one per environment).
 
+### Sticky strategies
+
+`sticky-strategy` controls how a sticky comment is updated on later runs:
+
+- **`edit`** (default) — edit the single comment in place. Silent (no notification
+  on edits). If `reply-path` is set, later runs **append** that body below the
+  existing comment instead of overwriting it, so the original header stays put and
+  updates accumulate underneath (like a running log).
+- **`replace`** — each run posts a **new** comment and **deletes** the previous one,
+  so only the latest remains *and* every run notifies (a new comment always
+  notifies). `reply-path` is ignored in this mode.
+
+```yaml
+steps:
+  - label: "Update deploy comment"
+    command: "./render-header.sh > /tmp/header.md && ./render-update.sh > /tmp/update.md"
+    plugins:
+      - NeelamAggarwal/github-pr-comment#v0.1.0:
+          pr: "$UPSTREAM_PULL_REQUEST"
+          repo: "acme/backend"
+          token-env: "GITHUB_API_TOKEN"
+          sticky: true
+          sticky-strategy: edit
+          comment-path: "/tmp/header.md"   # posted on the first run (the header)
+          reply-path: "/tmp/update.md"     # appended on every run after the first
+```
+
+```yaml
+steps:
+  - label: "Refresh deploy comment (notify each time)"
+    command: "./render-comment.sh > /tmp/comment.md"
+    plugins:
+      - NeelamAggarwal/github-pr-comment#v0.1.0:
+          pr: "$UPSTREAM_PULL_REQUEST"
+          repo: "acme/backend"
+          token-env: "GITHUB_API_TOKEN"
+          sticky: true
+          sticky-strategy: replace
+          comment-path: "/tmp/comment.md"
+```
+
 ## Configuration
 
 | Option         | Required | Default                        | Description                                                                 |
 | -------------- | -------- | ------------------------------ | --------------------------------------------------------------------------- |
-| `comment`      | one of\* | —                              | Literal markdown body to post.                                              |
-| `comment-path` | one of\* | —                              | Path to a file whose contents are posted, read at runtime.                  |
-| `pr`           | no       | `$BUILDKITE_PULL_REQUEST`      | PR number to comment on.                                                     |
-| `repo`         | no       | `$BUILDKITE_PULL_REQUEST_REPO` | Target repo as `owner/name` or a git/https URL.                             |
-| `token-env`    | no       | `GITHUB_TOKEN`                 | Name of the env var holding the GitHub token (used as a Bearer token).      |
-| `expand`       | no       | `false`                        | Expand `$VAR` in the body using the runtime environment (requires envsubst).|
-| `sticky`       | no       | `false`                        | Edit a single comment in place across runs instead of posting a new one.    |
-| `sticky-key`   | no       | `default`                      | Distinguishes independent sticky comments on the same PR.                   |
+| `comment`         | one of\* | —                              | Literal markdown body to post.                                              |
+| `comment-path`    | one of\* | —                              | Path to a file whose contents are posted, read at runtime.                  |
+| `reply-path`      | no       | —                              | File appended to a sticky comment on later runs (`sticky-strategy: edit`), read at runtime. |
+| `pr`              | no       | `$BUILDKITE_PULL_REQUEST`      | PR number to comment on.                                                     |
+| `repo`            | no       | `$BUILDKITE_PULL_REQUEST_REPO` | Target repo as `owner/name` or a git/https URL.                             |
+| `token-env`       | no       | `GITHUB_TOKEN`                 | Name of the env var holding the GitHub token (used as a Bearer token).      |
+| `expand`          | no       | `false`                        | Expand `$VAR` in the body using the runtime environment (requires envsubst).|
+| `sticky`          | no       | `false`                        | Edit a single comment in place across runs instead of posting a new one.    |
+| `sticky-key`      | no       | `default`                      | Distinguishes independent sticky comments on the same PR.                   |
+| `sticky-strategy` | no       | `edit`                         | `edit` (in place, silent; appends `reply-path`) or `replace` (new comment + delete old, notifies). |
 
 \* Exactly one of `comment` or `comment-path` must be provided.
 
@@ -113,8 +156,13 @@ on the same PR (e.g. one per environment).
 - A **failed API call** logs a warning with the HTTP status and response body, and
   does **not** fail the build.
 - With **`sticky: true`**, a hidden marker is appended to the body so subsequent
-  runs locate and **edit** the same comment. Comment edits do not trigger GitHub
-  notifications, so redeploys update silently.
+  runs locate the same comment. With `sticky-strategy: edit` (default) the comment
+  is edited in place (silent); with `sticky-strategy: replace` a new comment is
+  posted and the previous one deleted (notifies each run).
+- With **`sticky-strategy: edit` and `reply-path` set**, later runs append the
+  reply body below the existing comment (header preserved) instead of overwriting.
+- The **first run** for a sticky key always posts `comment`/`comment-path`;
+  `reply-path` only applies from the second run onward.
 
 ## Authentication
 

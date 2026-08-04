@@ -11,21 +11,29 @@
 # why the target repo and PR number are configurable rather than derived solely
 # from BUILDKITE_PULL_REQUEST_REPO.
 #
-# With `sticky: true`, the hook edits a single comment in place across runs
-# (identified by a hidden marker) instead of appending a new comment each time.
-# Editing a comment does not send GitHub notifications, so repeated runs update
-# the comment silently.
+# Posting behavior:
+#   - sticky: false (default)       -> always create a new comment.
+#   - sticky: true, strategy edit   -> maintain a single comment (found via a
+#       hidden marker). The first run posts `comment`/`comment-path`; later runs
+#       edit it in place. If `reply-path` is set, later runs instead append that
+#       body to the existing comment, leaving the original header untouched.
+#       Editing does not send GitHub notifications, so updates are silent.
+#   - sticky: true, strategy replace -> each run posts a fresh comment and
+#       deletes the previous one, so only the latest remains and every run
+#       notifies. `reply-path` is not used in this mode.
 
 set -euo pipefail
 
 comment="${BUILDKITE_PLUGIN_GITHUB_PR_COMMENT_COMMENT:-}"
 comment_path="${BUILDKITE_PLUGIN_GITHUB_PR_COMMENT_COMMENT_PATH:-}"
+reply_path="${BUILDKITE_PLUGIN_GITHUB_PR_COMMENT_REPLY_PATH:-}"
 pr="${BUILDKITE_PLUGIN_GITHUB_PR_COMMENT_PR:-${BUILDKITE_PULL_REQUEST:-}}"
 repo="${BUILDKITE_PLUGIN_GITHUB_PR_COMMENT_REPO:-${BUILDKITE_PULL_REQUEST_REPO:-}}"
 token_env="${BUILDKITE_PLUGIN_GITHUB_PR_COMMENT_TOKEN_ENV:-GITHUB_TOKEN}"
 expand="${BUILDKITE_PLUGIN_GITHUB_PR_COMMENT_EXPAND:-false}"
 sticky="${BUILDKITE_PLUGIN_GITHUB_PR_COMMENT_STICKY:-false}"
 sticky_key="${BUILDKITE_PLUGIN_GITHUB_PR_COMMENT_STICKY_KEY:-default}"
+strategy="${BUILDKITE_PLUGIN_GITHUB_PR_COMMENT_STICKY_STRATEGY:-edit}"
 
 log() { echo "github-pr-comment: $*" >&2; }
 
@@ -55,6 +63,24 @@ if [[ -z "$token" ]]; then
   exit 0
 fi
 
+if [[ "$strategy" != "edit" && "$strategy" != "replace" ]]; then
+  log "WARN unknown sticky-strategy '${strategy}'; defaulting to 'edit'."
+  strategy="edit"
+fi
+
+# expand_body reads a body on stdin and, when expand=true, resolves $VAR
+# references against the runtime environment via envsubst.
+expand_body() {
+  if [[ "$expand" == "true" ]] && command -v envsubst >/dev/null 2>&1; then
+    envsubst
+  else
+    cat
+  fi
+}
+if [[ "$expand" == "true" ]] && ! command -v envsubst >/dev/null 2>&1; then
+  log "WARN expand=true but envsubst is unavailable; posting bodies unexpanded."
+fi
+
 # Resolve the comment body from comment-path (read at runtime) or comment.
 body=""
 if [[ -n "$comment_path" ]]; then
@@ -62,19 +88,21 @@ if [[ -n "$comment_path" ]]; then
     log "comment-path '${comment_path}' not found; skipping."
     exit 0
   fi
-  body="$(cat "$comment_path")"
+  body="$(expand_body <"$comment_path")"
 elif [[ -n "$comment" ]]; then
-  body="$comment"
+  body="$(expand_body <<<"$comment")"
 else
   log "one of 'comment' or 'comment-path' is required; skipping."
   exit 0
 fi
 
-if [[ "$expand" == "true" ]]; then
-  if command -v envsubst >/dev/null 2>&1; then
-    body="$(envsubst <<<"$body")"
+# Resolve the optional reply body (used only by sticky edit updates).
+reply_body=""
+if [[ -n "$reply_path" ]]; then
+  if [[ -f "$reply_path" ]]; then
+    reply_body="$(expand_body <"$reply_path")"
   else
-    log "WARN expand=true but envsubst is unavailable; posting body unexpanded."
+    log "WARN reply-path '${reply_path}' not found; ignoring."
   fi
 fi
 
@@ -99,12 +127,35 @@ auth_headers=(
 )
 
 # For sticky comments, embed a hidden HTML-comment marker so future runs can
-# find and edit the same comment. The marker renders invisibly on GitHub.
+# find the same comment. The marker renders invisibly on GitHub.
 marker=""
 if [[ "$sticky" == "true" ]]; then
   marker="<!-- github-pr-comment:sticky:${sticky_key} -->"
   body="${body}"$'\n\n'"${marker}"
 fi
+
+# json_body <string> writes a GitHub API {"body": ...} payload to the payload
+# file, using whichever JSON tool is available.
+json_body() {
+  if [[ "$json_tool" == "jq" ]]; then
+    jq -n --arg body "$1" '{body: $body}' >"$payload_file"
+  else
+    GHPC_BODY="$1" python3 -c 'import json, os, sys; sys.stdout.write(json.dumps({"body": os.environ["GHPC_BODY"]}))' >"$payload_file"
+  fi
+}
+
+# read_json_body reads an API comment object on stdin and prints its .body.
+read_json_body() {
+  if [[ "$json_tool" == "jq" ]]; then
+    jq -r '.body // empty'
+  else
+    python3 -c 'import json,sys
+try:
+    sys.stdout.write(json.load(sys.stdin).get("body") or "")
+except Exception:
+    pass'
+  fi
+}
 
 # Find the id of an existing sticky comment carrying the marker, if any.
 # Pages through issue comments (up to 10 pages of 100). Best-effort: any error
@@ -140,47 +191,95 @@ except Exception:
   return 0
 }
 
-comment_id=""
-if [[ "$sticky" == "true" ]]; then
-  comment_id="$(find_sticky_comment_id "$marker")"
-fi
+# get_comment_body <id> prints the current body of an existing comment.
+get_comment_body() {
+  local id="$1" resp
+  resp="$(curl -sS "${auth_headers[@]}" "${api}/issues/comments/${id}")" || return 1
+  read_json_body <<<"$resp"
+}
 
 response_file="$(mktemp)"
 payload_file="$(mktemp)"
 trap 'rm -f "$response_file" "$payload_file"' EXIT
 
-if [[ "$json_tool" == "jq" ]]; then
-  jq -n --arg body "$body" '{body: $body}' >"$payload_file"
-else
-  GHPC_BODY="$body" python3 -c 'import json, os, sys; sys.stdout.write(json.dumps({"body": os.environ["GHPC_BODY"]}))' >"$payload_file"
-fi
+# send <method> <url> performs the request, capturing the HTTP status in the
+# global http_code and the response body in response_file.
+http_code=""
+send() {
+  http_code="$(
+    curl -sS -o "$response_file" -w '%{http_code}' \
+      -X "$1" \
+      "${auth_headers[@]}" \
+      -H "Content-Type: application/json" \
+      --data-binary @"$payload_file" \
+      "$2" || true
+  )"
+}
 
-if [[ -n "$comment_id" ]]; then
-  method="PATCH"
-  url="${api}/issues/comments/${comment_id}"
-  log "editing existing comment ${comment_id} on ${owner_repo}#${pr}"
-else
-  method="POST"
-  url="${api}/issues/${pr}/comments"
+succeeded() { [[ "$http_code" =~ ^2 ]]; }
+warn_failure() {
+  log "WARN $1 failed (HTTP ${http_code:-000}); not failing the build."
+  cat "$response_file" >&2 || true
+}
+
+# Non-sticky: always create a new comment.
+if [[ "$sticky" != "true" ]]; then
+  json_body "$body"
   log "posting comment to ${owner_repo}#${pr}"
+  send POST "${api}/issues/${pr}/comments"
+  if succeeded; then log "posted comment to ${owner_repo}#${pr}."; else warn_failure "POST"; fi
+  exit 0
 fi
 
-http_code="$(
-  curl -sS -o "$response_file" -w '%{http_code}' \
-    -X "$method" \
-    "${auth_headers[@]}" \
-    -H "Content-Type: application/json" \
-    --data-binary @"$payload_file" \
-    "$url" || true
-)"
+comment_id="$(find_sticky_comment_id "$marker")"
 
-if [[ "$http_code" =~ ^2 ]]; then
-  if [[ -n "$comment_id" ]]; then
-    log "edited comment ${comment_id} on ${owner_repo}#${pr}."
-  else
+if [[ "$strategy" == "replace" ]]; then
+  # Post a fresh comment, then delete the previous one. Post-first so the PR is
+  # never momentarily without the comment; the delete is best-effort.
+  json_body "$body"
+  log "posting comment to ${owner_repo}#${pr} (replace)"
+  send POST "${api}/issues/${pr}/comments"
+  if succeeded; then
     log "posted comment to ${owner_repo}#${pr}."
+    if [[ -n "$comment_id" ]]; then
+      del_code="$(curl -sS -o /dev/null -w '%{http_code}' -X DELETE "${auth_headers[@]}" "${api}/issues/comments/${comment_id}" || true)"
+      if [[ "$del_code" =~ ^2 ]]; then
+        log "deleted previous comment ${comment_id}."
+      else
+        log "WARN failed to delete previous comment ${comment_id} (HTTP ${del_code:-000})."
+      fi
+    fi
+  else
+    warn_failure "POST"
+  fi
+  exit 0
+fi
+
+# strategy == edit
+if [[ -z "$comment_id" ]]; then
+  # First run for this sticky key: create the header comment.
+  json_body "$body"
+  log "posting comment to ${owner_repo}#${pr}"
+  send POST "${api}/issues/${pr}/comments"
+  if succeeded; then log "posted comment to ${owner_repo}#${pr}."; else warn_failure "POST"; fi
+  exit 0
+fi
+
+# Subsequent run: append the reply below the existing body if one is configured,
+# otherwise edit the header in place.
+if [[ -n "$reply_body" ]]; then
+  existing="$(get_comment_body "$comment_id" || true)"
+  if [[ -z "$existing" ]]; then
+    log "WARN could not read existing comment ${comment_id}; editing header instead."
+    json_body "$body"
+  else
+    json_body "${existing}"$'\n\n'"${reply_body}"
+    log "appending reply to comment ${comment_id} on ${owner_repo}#${pr}"
   fi
 else
-  log "WARN failed to ${method} comment (HTTP ${http_code:-000}); not failing the build."
-  cat "$response_file" >&2 || true
+  json_body "$body"
+  log "editing comment ${comment_id} on ${owner_repo}#${pr}"
 fi
+
+send PATCH "${api}/issues/comments/${comment_id}"
+if succeeded; then log "updated comment ${comment_id} on ${owner_repo}#${pr}."; else warn_failure "PATCH"; fi

@@ -11,8 +11,10 @@ setup() {
   unset BUILDKITE_PLUGIN_GITHUB_PR_COMMENT_TOKEN_ENV
   unset BUILDKITE_PLUGIN_GITHUB_PR_COMMENT_COMMENT
   unset BUILDKITE_PLUGIN_GITHUB_PR_COMMENT_COMMENT_PATH
+  unset BUILDKITE_PLUGIN_GITHUB_PR_COMMENT_REPLY_PATH
   unset BUILDKITE_PLUGIN_GITHUB_PR_COMMENT_STICKY
   unset BUILDKITE_PLUGIN_GITHUB_PR_COMMENT_STICKY_KEY
+  unset BUILDKITE_PLUGIN_GITHUB_PR_COMMENT_STICKY_STRATEGY
 }
 
 @test "skips when there is no PR number" {
@@ -78,4 +80,31 @@ setup() {
   run "$HOOK"
   [ "$status" -eq 0 ]
   [[ "$output" == *"is not set; skipping."* ]]
+}
+
+@test "sticky replace still honors guards (skips on missing token)" {
+  export BUILDKITE_PLUGIN_GITHUB_PR_COMMENT_PR="123"
+  export BUILDKITE_PLUGIN_GITHUB_PR_COMMENT_REPO="acme/backend"
+  export BUILDKITE_PLUGIN_GITHUB_PR_COMMENT_TOKEN_ENV="DOES_NOT_EXIST_TOKEN"
+  export BUILDKITE_PLUGIN_GITHUB_PR_COMMENT_STICKY="true"
+  export BUILDKITE_PLUGIN_GITHUB_PR_COMMENT_STICKY_STRATEGY="replace"
+  export BUILDKITE_PLUGIN_GITHUB_PR_COMMENT_COMMENT="hi"
+  run "$HOOK"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"is not set; skipping."* ]]
+}
+
+@test "unknown sticky-strategy warns and defaults to edit" {
+  export BUILDKITE_PLUGIN_GITHUB_PR_COMMENT_PR="123"
+  export BUILDKITE_PLUGIN_GITHUB_PR_COMMENT_REPO="acme/backend"
+  export BUILDKITE_PLUGIN_GITHUB_PR_COMMENT_TOKEN_ENV="FAKE_TOKEN"
+  export FAKE_TOKEN="x"
+  export BUILDKITE_PLUGIN_GITHUB_PR_COMMENT_STICKY="true"
+  export BUILDKITE_PLUGIN_GITHUB_PR_COMMENT_STICKY_STRATEGY="bogus"
+  # No comment/comment-path, so it exits at the body guard after the strategy
+  # warning is emitted (keeps this test network-free).
+  run "$HOOK"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"unknown sticky-strategy 'bogus'; defaulting to 'edit'."* ]]
+  [[ "$output" == *"one of 'comment' or 'comment-path' is required"* ]]
 }
