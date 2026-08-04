@@ -15,7 +15,7 @@ configuration:
       description: Path to a file whose contents are posted as the comment body, read at runtime. Mutually exclusive with comment.
     reply-path:
       type: string
-      description: Path to a file whose contents are appended to an existing sticky comment on later runs (sticky true, strategy edit), leaving the original header untouched. Read at runtime.
+      description: Path to a file whose contents are added to an existing sticky comment on later runs (sticky true, edit-append/edit-latest strategies), leaving the original header untouched. Read at runtime.
     pr:
       type: string
       description: Pull request number to comment on. Defaults to $BUILDKITE_PULL_REQUEST.
@@ -37,7 +37,8 @@ configuration:
     sticky-strategy:
       type: string
       enum:
-        - edit
+        - edit-append
+        - edit-latest
         - replace
-      description: How a sticky comment is updated on later runs. "edit" (default) edits the comment in place silently (and appends reply-path when set); "replace" posts a new comment and deletes the previous one, so only the latest remains and every run notifies.
+      description: How a sticky comment is updated on later runs. "edit-append" (default) edits in place silently, appending reply-path below the existing body (full history). "edit-latest" edits in place silently, keeping the header but only the newest reply-path. "replace" posts a new comment and deletes the previous one, so only the latest remains and every run notifies (reply-path unused).
   additionalProperties: false

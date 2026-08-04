@@ -93,12 +93,15 @@ on the same PR (e.g. one per environment).
 
 ### Sticky strategies
 
-`sticky-strategy` controls how a sticky comment is updated on later runs:
+`sticky-strategy` controls how a sticky comment is updated on later runs (the
+first run always posts `comment`/`comment-path`):
 
-- **`edit`** (default) — edit the single comment in place. Silent (no notification
-  on edits). If `reply-path` is set, later runs **append** that body below the
-  existing comment instead of overwriting it, so the original header stays put and
-  updates accumulate underneath (like a running log).
+- **`edit-append`** (default) — edit the single comment in place, silently (no
+  notification on edits). If `reply-path` is set, later runs **append** it below
+  the existing body, so the original header stays put and updates accumulate
+  underneath (a running log).
+- **`edit-latest`** — edit in place, silently, but keep the header and show only
+  the **newest** `reply-path` (no history; the comment stays a fixed size).
 - **`replace`** — each run posts a **new** comment and **deletes** the previous one,
   so only the latest remains *and* every run notifies (a new comment always
   notifies). `reply-path` is ignored in this mode.
@@ -113,9 +116,9 @@ steps:
           repo: "acme/backend"
           token-env: "GITHUB_API_TOKEN"
           sticky: true
-          sticky-strategy: edit
+          sticky-strategy: edit-append   # or edit-latest to keep only the newest reply
           comment-path: "/tmp/header.md"   # posted on the first run (the header)
-          reply-path: "/tmp/update.md"     # appended on every run after the first
+          reply-path: "/tmp/update.md"     # added on every run after the first
 ```
 
 ```yaml
@@ -138,14 +141,14 @@ steps:
 | -------------- | -------- | ------------------------------ | --------------------------------------------------------------------------- |
 | `comment`         | one of\* | —                              | Literal markdown body to post.                                              |
 | `comment-path`    | one of\* | —                              | Path to a file whose contents are posted, read at runtime.                  |
-| `reply-path`      | no       | —                              | File appended to a sticky comment on later runs (`sticky-strategy: edit`), read at runtime. |
+| `reply-path`      | no       | —                              | File added to a sticky comment on later runs (`edit-append`/`edit-latest`), read at runtime. |
 | `pr`              | no       | `$BUILDKITE_PULL_REQUEST`      | PR number to comment on.                                                     |
 | `repo`            | no       | `$BUILDKITE_PULL_REQUEST_REPO` | Target repo as `owner/name` or a git/https URL.                             |
 | `token-env`       | no       | `GITHUB_TOKEN`                 | Name of the env var holding the GitHub token (used as a Bearer token).      |
 | `expand`          | no       | `false`                        | Expand `$VAR` in the body using the runtime environment (requires envsubst).|
 | `sticky`          | no       | `false`                        | Edit a single comment in place across runs instead of posting a new one.    |
 | `sticky-key`      | no       | `default`                      | Distinguishes independent sticky comments on the same PR.                   |
-| `sticky-strategy` | no       | `edit`                         | `edit` (in place, silent; appends `reply-path`) or `replace` (new comment + delete old, notifies). |
+| `sticky-strategy` | no       | `edit-append`                  | `edit-append` (in place, silent; appends `reply-path` as a log), `edit-latest` (in place, silent; keeps only the newest `reply-path`), or `replace` (new comment + delete old, notifies). |
 
 \* Exactly one of `comment` or `comment-path` must be provided.
 
@@ -156,11 +159,12 @@ steps:
 - A **failed API call** logs a warning with the HTTP status and response body, and
   does **not** fail the build.
 - With **`sticky: true`**, a hidden marker is appended to the body so subsequent
-  runs locate the same comment. With `sticky-strategy: edit` (default) the comment
-  is edited in place (silent); with `sticky-strategy: replace` a new comment is
-  posted and the previous one deleted (notifies each run).
-- With **`sticky-strategy: edit` and `reply-path` set**, later runs append the
-  reply body below the existing comment (header preserved) instead of overwriting.
+  runs locate the same comment. `edit-append` (default) and `edit-latest` edit in
+  place (silent); `replace` posts a new comment and deletes the previous one
+  (notifies each run).
+- With **`reply-path` set**, `edit-append` appends it below the existing comment
+  (header + full history preserved) and `edit-latest` keeps the header but shows
+  only the newest reply.
 - The **first run** for a sticky key always posts `comment`/`comment-path`;
   `reply-path` only applies from the second run onward.
 

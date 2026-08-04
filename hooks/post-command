@@ -12,15 +12,17 @@
 # from BUILDKITE_PULL_REQUEST_REPO.
 #
 # Posting behavior:
-#   - sticky: false (default)       -> always create a new comment.
-#   - sticky: true, strategy edit   -> maintain a single comment (found via a
-#       hidden marker). The first run posts `comment`/`comment-path`; later runs
-#       edit it in place. If `reply-path` is set, later runs instead append that
-#       body to the existing comment, leaving the original header untouched.
-#       Editing does not send GitHub notifications, so updates are silent.
-#   - sticky: true, strategy replace -> each run posts a fresh comment and
-#       deletes the previous one, so only the latest remains and every run
-#       notifies. `reply-path` is not used in this mode.
+#   - sticky: false (default) -> always create a new comment.
+#   - sticky: true -> maintain a single comment per key (found via a hidden
+#       marker). The first run posts `comment`/`comment-path`. `sticky-strategy`
+#       controls later runs:
+#         * edit-append (default): edit in place; if `reply-path` is set, append
+#             it below the existing body, keeping the original header and all
+#             prior replies (a running log). Silent (no GitHub notification).
+#         * edit-latest: edit in place; if `reply-path` is set, keep the header
+#             but show only the newest reply. Silent.
+#         * replace: post a fresh comment and delete the previous one, so only
+#             the latest remains and every run notifies. `reply-path` is unused.
 
 set -euo pipefail
 
@@ -33,7 +35,7 @@ token_env="${BUILDKITE_PLUGIN_GITHUB_PR_COMMENT_TOKEN_ENV:-GITHUB_TOKEN}"
 expand="${BUILDKITE_PLUGIN_GITHUB_PR_COMMENT_EXPAND:-false}"
 sticky="${BUILDKITE_PLUGIN_GITHUB_PR_COMMENT_STICKY:-false}"
 sticky_key="${BUILDKITE_PLUGIN_GITHUB_PR_COMMENT_STICKY_KEY:-default}"
-strategy="${BUILDKITE_PLUGIN_GITHUB_PR_COMMENT_STICKY_STRATEGY:-edit}"
+strategy="${BUILDKITE_PLUGIN_GITHUB_PR_COMMENT_STICKY_STRATEGY:-edit-append}"
 
 log() { echo "github-pr-comment: $*" >&2; }
 
@@ -63,9 +65,9 @@ if [[ -z "$token" ]]; then
   exit 0
 fi
 
-if [[ "$strategy" != "edit" && "$strategy" != "replace" ]]; then
-  log "WARN unknown sticky-strategy '${strategy}'; defaulting to 'edit'."
-  strategy="edit"
+if [[ "$strategy" != "edit-append" && "$strategy" != "edit-latest" && "$strategy" != "replace" ]]; then
+  log "WARN unknown sticky-strategy '${strategy}'; defaulting to 'edit-append'."
+  strategy="edit-append"
 fi
 
 # expand_body reads a body on stdin and, when expand=true, resolves $VAR
@@ -255,7 +257,7 @@ if [[ "$strategy" == "replace" ]]; then
   exit 0
 fi
 
-# strategy == edit
+# strategy == edit-append | edit-latest
 if [[ -z "$comment_id" ]]; then
   # First run for this sticky key: create the header comment.
   json_body "$body"
@@ -265,9 +267,19 @@ if [[ -z "$comment_id" ]]; then
   exit 0
 fi
 
-# Subsequent run: append the reply below the existing body if one is configured,
-# otherwise edit the header in place.
-if [[ -n "$reply_body" ]]; then
+# Subsequent run.
+if [[ -z "$reply_body" ]]; then
+  # No reply configured: edit the header in place.
+  json_body "$body"
+  log "editing comment ${comment_id} on ${owner_repo}#${pr}"
+elif [[ "$strategy" == "edit-latest" ]]; then
+  # Keep the header, show only the newest reply. Recompose from the header body
+  # (which already carries the marker), no read of the existing comment needed.
+  json_body "${body}"$'\n\n'"${reply_body}"
+  log "updating comment ${comment_id} with latest reply on ${owner_repo}#${pr}"
+else
+  # edit-append: append the reply below the existing body, keeping the header and
+  # all prior replies. Fall back to editing the header if the read fails.
   existing="$(get_comment_body "$comment_id" || true)"
   if [[ -z "$existing" ]]; then
     log "WARN could not read existing comment ${comment_id}; editing header instead."
@@ -276,9 +288,6 @@ if [[ -n "$reply_body" ]]; then
     json_body "${existing}"$'\n\n'"${reply_body}"
     log "appending reply to comment ${comment_id} on ${owner_repo}#${pr}"
   fi
-else
-  json_body "$body"
-  log "editing comment ${comment_id} on ${owner_repo}#${pr}"
 fi
 
 send PATCH "${api}/issues/comments/${comment_id}"

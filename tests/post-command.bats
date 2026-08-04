@@ -94,7 +94,7 @@ setup() {
   [[ "$output" == *"is not set; skipping."* ]]
 }
 
-@test "unknown sticky-strategy warns and defaults to edit" {
+@test "unknown sticky-strategy warns and defaults to edit-append" {
   export BUILDKITE_PLUGIN_GITHUB_PR_COMMENT_PR="123"
   export BUILDKITE_PLUGIN_GITHUB_PR_COMMENT_REPO="acme/backend"
   export BUILDKITE_PLUGIN_GITHUB_PR_COMMENT_TOKEN_ENV="FAKE_TOKEN"
@@ -105,6 +105,18 @@ setup() {
   # warning is emitted (keeps this test network-free).
   run "$HOOK"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"unknown sticky-strategy 'bogus'; defaulting to 'edit'."* ]]
+  [[ "$output" == *"unknown sticky-strategy 'bogus'; defaulting to 'edit-append'."* ]]
   [[ "$output" == *"one of 'comment' or 'comment-path' is required"* ]]
+}
+
+@test "edit-latest honors guards (skips on missing token)" {
+  export BUILDKITE_PLUGIN_GITHUB_PR_COMMENT_PR="123"
+  export BUILDKITE_PLUGIN_GITHUB_PR_COMMENT_REPO="acme/backend"
+  export BUILDKITE_PLUGIN_GITHUB_PR_COMMENT_TOKEN_ENV="DOES_NOT_EXIST_TOKEN"
+  export BUILDKITE_PLUGIN_GITHUB_PR_COMMENT_STICKY="true"
+  export BUILDKITE_PLUGIN_GITHUB_PR_COMMENT_STICKY_STRATEGY="edit-latest"
+  export BUILDKITE_PLUGIN_GITHUB_PR_COMMENT_COMMENT="hi"
+  run "$HOOK"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"is not set; skipping."* ]]
 }
