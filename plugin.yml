@@ -41,4 +41,7 @@ configuration:
         - edit-latest
         - replace
       description: How a sticky comment is updated on later runs. "edit-append" (default) edits in place silently, appending reply-path below the existing body (full history). "edit-latest" edits in place silently, keeping the header but only the newest reply-path. "replace" posts a new comment and deletes the previous one, so only the latest remains and every run notifies (reply-path unused).
+    notify-label:
+      type: string
+      description: When set, force the "replace" strategy (which notifies) only if the target PR carries this label; otherwise the configured sticky-strategy is used unchanged. Requires sticky true. Lets notifications be opt-in per PR.
   additionalProperties: false

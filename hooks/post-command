@@ -23,6 +23,10 @@
 #             but show only the newest reply. Silent.
 #         * replace: post a fresh comment and delete the previous one, so only
 #             the latest remains and every run notifies. `reply-path` is unused.
+#
+# notify-label: optional opt-in. When set, the target PR is checked for that
+# label; if present the strategy is forced to `replace` (so GitHub notifies),
+# otherwise the configured (silent) strategy is used unchanged.
 
 set -euo pipefail
 
@@ -36,6 +40,7 @@ expand="${BUILDKITE_PLUGIN_GITHUB_PR_COMMENT_EXPAND:-false}"
 sticky="${BUILDKITE_PLUGIN_GITHUB_PR_COMMENT_STICKY:-false}"
 sticky_key="${BUILDKITE_PLUGIN_GITHUB_PR_COMMENT_STICKY_KEY:-default}"
 strategy="${BUILDKITE_PLUGIN_GITHUB_PR_COMMENT_STICKY_STRATEGY:-edit-append}"
+notify_label="${BUILDKITE_PLUGIN_GITHUB_PR_COMMENT_NOTIFY_LABEL:-}"
 
 log() { echo "github-pr-comment: $*" >&2; }
 
@@ -134,6 +139,31 @@ marker=""
 if [[ "$sticky" == "true" ]]; then
   marker="<!-- github-pr-comment:sticky:${sticky_key} -->"
   body="${body}"$'\n\n'"${marker}"
+fi
+
+# notify-label opt-in: force `replace` (which notifies) when the PR carries the
+# label; otherwise keep the configured strategy. Best-effort: a failed lookup
+# leaves the strategy unchanged.
+if [[ "$sticky" == "true" && -n "$notify_label" ]]; then
+  labels_resp="$(curl -sS "${auth_headers[@]}" "${api}/issues/${pr}" || true)"
+  has_label=""
+  if [[ "$json_tool" == "jq" ]]; then
+    has_label="$(jq -r --arg l "$notify_label" 'if any(.labels[]?; .name == $l) then "yes" else "" end' <<<"$labels_resp" 2>/dev/null || true)"
+  else
+    has_label="$(GHPC_LABEL="$notify_label" python3 -c 'import json,os,sys
+l=os.environ["GHPC_LABEL"]
+try:
+    d=json.load(sys.stdin)
+    print("yes" if any(isinstance(x,dict) and x.get("name")==l for x in (d.get("labels") or [])) else "")
+except Exception:
+    print("")' <<<"$labels_resp" 2>/dev/null || true)"
+  fi
+  if [[ -n "$has_label" ]]; then
+    log "PR carries '${notify_label}'; using replace strategy to notify."
+    strategy="replace"
+  else
+    log "PR lacks '${notify_label}'; keeping '${strategy}' (silent)."
+  fi
 fi
 
 # json_body <string> writes a GitHub API {"body": ...} payload to the payload

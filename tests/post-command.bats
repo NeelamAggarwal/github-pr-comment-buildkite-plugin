@@ -15,6 +15,7 @@ setup() {
   unset BUILDKITE_PLUGIN_GITHUB_PR_COMMENT_STICKY
   unset BUILDKITE_PLUGIN_GITHUB_PR_COMMENT_STICKY_KEY
   unset BUILDKITE_PLUGIN_GITHUB_PR_COMMENT_STICKY_STRATEGY
+  unset BUILDKITE_PLUGIN_GITHUB_PR_COMMENT_NOTIFY_LABEL
 }
 
 @test "skips when there is no PR number" {
@@ -107,6 +108,18 @@ setup() {
   [ "$status" -eq 0 ]
   [[ "$output" == *"unknown sticky-strategy 'bogus'; defaulting to 'edit-append'."* ]]
   [[ "$output" == *"one of 'comment' or 'comment-path' is required"* ]]
+}
+
+@test "notify-label honors guards (skips on missing token before any label lookup)" {
+  export BUILDKITE_PLUGIN_GITHUB_PR_COMMENT_PR="123"
+  export BUILDKITE_PLUGIN_GITHUB_PR_COMMENT_REPO="acme/backend"
+  export BUILDKITE_PLUGIN_GITHUB_PR_COMMENT_TOKEN_ENV="DOES_NOT_EXIST_TOKEN"
+  export BUILDKITE_PLUGIN_GITHUB_PR_COMMENT_STICKY="true"
+  export BUILDKITE_PLUGIN_GITHUB_PR_COMMENT_NOTIFY_LABEL="notify-me"
+  export BUILDKITE_PLUGIN_GITHUB_PR_COMMENT_COMMENT="hi"
+  run "$HOOK"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"is not set; skipping."* ]]
 }
 
 @test "edit-latest honors guards (skips on missing token)" {

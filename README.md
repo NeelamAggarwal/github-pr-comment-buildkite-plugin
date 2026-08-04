@@ -135,6 +135,28 @@ steps:
           comment-path: "/tmp/comment.md"
 ```
 
+### Opt-in notifications via a label
+
+Use `notify-label` to make notifications opt-in per PR: the plugin updates the
+comment **silently** (using the configured strategy) unless the target PR carries
+the label, in which case it switches to `replace` so every run notifies. Handy for
+letting individuals opt into pings without spamming everyone.
+
+```yaml
+steps:
+  - label: "Deploy comment"
+    command: "./render-comment.sh > /tmp/comment.md"
+    plugins:
+      - NeelamAggarwal/github-pr-comment#v0.1.0:
+          pr: "$UPSTREAM_PULL_REQUEST"
+          repo: "acme/backend"
+          token-env: "GITHUB_API_TOKEN"
+          sticky: true
+          sticky-strategy: edit-append          # silent by default
+          notify-label: "notify-deploys-on-pr"  # add this label to the PR to get pings
+          comment-path: "/tmp/comment.md"
+```
+
 ## Configuration
 
 | Option         | Required | Default                        | Description                                                                 |
@@ -149,6 +171,7 @@ steps:
 | `sticky`          | no       | `false`                        | Edit a single comment in place across runs instead of posting a new one.    |
 | `sticky-key`      | no       | `default`                      | Distinguishes independent sticky comments on the same PR.                   |
 | `sticky-strategy` | no       | `edit-append`                  | `edit-append` (in place, silent; appends `reply-path` as a log), `edit-latest` (in place, silent; keeps only the newest `reply-path`), or `replace` (new comment + delete old, notifies). |
+| `notify-label`    | no       | —                              | If set, force `replace` (notifies) only when the target PR has this label; else use the configured strategy. Requires `sticky`. |
 
 \* Exactly one of `comment` or `comment-path` must be provided.
 
@@ -167,6 +190,9 @@ steps:
   only the newest reply.
 - The **first run** for a sticky key always posts `comment`/`comment-path`;
   `reply-path` only applies from the second run onward.
+- With **`notify-label` set**, the PR's labels are checked at runtime; the label
+  being present forces `replace` (notifies), otherwise the configured strategy is
+  used. A failed lookup leaves the strategy unchanged.
 
 ## Authentication
 
